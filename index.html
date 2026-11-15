@@ -234,7 +234,8 @@ function nextDate(r,s){const day=r.day||pd(s).getDate();
   return addMonths(s,1,day)}
 function occurrences(r,from,to){const o=[];let d=r.nextDate,g=0;while(d<=to&&g++<800){if(r.endDate&&d>r.endDate)break;if(d>=from)o.push(d);d=nextDate(r,d)}return o}
 function processRecurring(){const t=today();let n=0;
-  for(const r of S.recurring){if(!r.active)continue;let g=0;
+  for(const r of S.recurring){if(!r.active||r.auto===false)continue;let g=0; // auto:false = queda pendiente hasta que el usuario lo confirme
+   
     while(r.nextDate<=t&&g++<400){let amount=r.amount;
       if(r.debtId){const d=S.debts.find(x=>x.id===r.debtId);if(!d){r.active=false;break}const bal=debtInfo(d).bal;if(bal<=0.5){r.active=false;break}amount=Math.min(payAt(d,r.nextDate)||amount,Math.round(bal*100)/100)}
       S.tx.push({id:uid(),type:r.type,amount,date:r.nextDate,accountId:r.accountId,toAccountId:r.toAccountId,categoryId:r.categoryId,note:r.note||'',recurringId:r.id,...(r.debtId?{debtId:r.debtId}:{})});n++;
@@ -244,9 +245,9 @@ function nextDue(d){if(d.payMode==='single')return d.dueDate||today();const t=to
   if(due<t||S.tx.some(x=>x.debtId===d.id&&x.date.startsWith(ym)))due=addMonths(ym+'-01',1,day);return due}
 function upcoming(days=30){const t=today(),to=addDays(t,days),o=[];
   for(const r of S.recurring){if(!r.active)continue;const dd=r.debtId&&S.debts.find(x=>x.id===r.debtId),db=dd?debtInfo(dd).bal:0;if(dd&&db<=0.5)continue;
-    let oc=occurrences(r,t,to);if(dd?.payMode==='single')oc=oc.slice(0,1); // un pago único no se repite
-    for(const d of oc)o.push({date:d,name:r.note||cat(r.categoryId).name,icon:r.type==='transfer'?'🔁':cat(r.categoryId).icon,amount:dd?Math.min(payAt(dd,d)||r.amount,db):r.amount,type:r.type})}
-  for(const d of S.debts){const due=nextDue(d),p=payAt(d,due);if(!(p>0)||S.recurring.some(r=>r.debtId===d.id&&r.active))continue;const i=debtInfo(d);if(i.bal<=0.5)continue;if(due<=to)o.push({date:due,name:(d.payMode==='single'?'Pago ':'Cuota ')+d.name,icon:'💳',amount:Math.min(p,i.bal),type:d.kind==='owed'?'income':'expense',manual:true})}
+    const man=r.auto===false;let oc=man?(r.nextDate<=to?[r.nextDate]:[]):occurrences(r,t,to);if(dd?.payMode==='single')oc=oc.slice(0,1); // manual: solo el próximo pendiente (aunque esté vencido); pago único: no se repite
+    for(const d of oc)o.push({date:d,name:r.note||cat(r.categoryId).name,icon:r.type==='transfer'?'🔁':cat(r.categoryId).icon,amount:dd?Math.min(payAt(dd,d)||r.amount,db):r.amount,type:r.type,manual:man,recId:r.id,overdue:d<t})}
+  for(const d of S.debts){const due=nextDue(d),p=payAt(d,due);if(!(p>0)||S.recurring.some(r=>r.debtId===d.id&&r.active))continue;const i=debtInfo(d);if(i.bal<=0.5)continue;if(due<=to)o.push({date:due,name:(d.payMode==='single'?'Pago ':'Cuota ')+d.name,icon:'💳',amount:Math.min(p,i.bal),type:d.kind==='owed'?'income':'expense',manual:true,debtId:d.id,overdue:due<t})}
   return o.sort((a,b)=>a.date<b.date?-1:1)}
 function project(n=12){
   const t=today(),cur=t.slice(0,7),d=pd(t),dim=lastDay(d.getFullYear(),d.getMonth());
@@ -260,7 +261,7 @@ function project(n=12){
   const ds=S.debts.map(x=>({d:x,bal:debtInfo(x).bal,mr:mRate(x)})),rows=[];
   for(let i=0;i<n;i++){const ym=addMonths(cur+'-01',i).slice(0,7),y=+ym.slice(0,4),m=+ym.slice(5)-1,from=i?ym+'-01':addDays(t,1),to=`${ym}-${pad(lastDay(y,m))}`,f=i?1:(dim-d.getDate())/dim;
     let inc=vi*f,exp=ve*f;
-    for(const r of S.recurring){if(!r.active||r.debtId||r.type==='transfer')continue;const k=occurrences(r,from,to).length*r.amount;r.type==='income'?inc+=k:exp+=k}
+    for(const r of S.recurring){if(!r.active||r.debtId||r.type==='transfer')continue;const k=occurrences(r,!i&&r.auto===false?'0':from,to).length*r.amount;r.type==='income'?inc+=k:exp+=k}
     for(const s of ds){if(s.bal<=0.5)continue;
       if(s.d.payMode==='single'){const dd=s.d.dueDate||'';if(i)s.bal+=s.bal*s.mr;if(dd&&(dd.slice(0,7)===ym||(!i&&dd<t))){s.d.kind==='owed'?inc+=s.bal:exp+=s.bal;s.bal=0}continue}
       const due=addMonths(ym+'-01',0,s.d.dueDay||pd(s.d.startDate).getDate());if(!i&&(due<=t||S.tx.some(x=>x.debtId===s.d.id&&x.date.startsWith(ym))))continue;
@@ -311,16 +312,16 @@ function vHome(){
   if(cats.length>5)top.push({label:'Resto',value:sum(cats.slice(5),x=>x[1]),color:'#8e8e93',icon:'▫️'});
   const six=[5,4,3,2,1,0].map(i=>{const ym=addMonths(M+'-01',-i).slice(0,7),t=monthTotals(ym);return{label:mShort(ym),inc:t.inc,exp:t.exp}});
   const alerts=S.categories.filter(c=>S.budgets[c.id]>0&&(mt.by[c.id]||0)/S.budgets[c.id]>=.8);
-  const up=upcoming(30).slice(0,5),last=[...S.tx].sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0).slice(0,5);
+  const up=upcoming(30).slice(0,8),last=[...S.tx].sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0).slice(0,5);
   let pace='';if(isCur&&mt.exp>0){const est=mt.exp+project(1).rows[0].exp;pace=`<div class="tip" style="margin-top:10px">📈 Según tus hábitos y pagos programados cerrarás el mes con <b>${money(est)}</b> en gastos${mt.inc?` (${Math.round(est/mt.inc*100)}% de tus ingresos)`:''}.</div>`}
   const fresh=!S.tx.length&&S.accounts.every(a=>!a.initial);
   return `${fresh?`<div class="card"><h3>👋 Bienvenido</h3><p class="tip" style="margin:0 0 12px">Empieza poniendo cuánto dinero tienes hoy en cada cuenta. Luego registra cada ingreso y gasto con el botón <b>+</b>; todo lo demás se calcula solo.</p><div class="row"><button class="btn sm" onclick="go('acc')">Configurar cuentas</button><button class="btn sm s" onclick="go('debts')">Agregar deudas</button></div></div>`:''}
   <div class="card hero"><div class="l">Patrimonio neto</div><div class="big">${money(net)}</div><div class="row"><div><span class="l">Disponible</span><b>${money(liquid+cardDebt)}</b></div><div><span class="l">Debo</span><b>${money(owe+cardDebt)}</b></div><div><span class="l">Me deben</span><b>${money(owed)}</b></div></div></div>
   <div class="g3"><div class="st"><div class="l">Ingresos</div><b class="pos">${money(mt.inc)}</b></div><div class="st"><div class="l">Gastos</div><b class="neg">${money(mt.exp)}</b></div><div class="st"><div class="l">Balance</div><b class="${mt.inc-mt.exp<0?'neg':''}">${money(mt.inc-mt.exp)}</b></div></div>
+  ${up.length?`<div class="card"><h3>Por pagar · próximos 30 días<button onclick="go('rec')">Recurrentes</button></h3>${up.map(u=>`<div class="li"><div class="ic">${u.icon}</div><div class="m"><b>${esc(u.name)}</b><span class="${u.overdue?'neg':''}">${u.overdue?'Vencido · ':''}${dLabel(u.date)}${u.manual?'':' · automático'}</span></div><div class="v ${u.type==='income'?'pos':''}">${money(u.amount)}</div>${u.manual?`<button class="btn sm" style="width:auto;flex:none;padding:8px 12px" onclick="${u.recId?`openConfirm('${u.recId}')`:`openPay('${u.debtId}')`}">${u.type==='income'?'Recibí':'Pagar'}</button>`:''}</div>`).join('')}</div>`:''}
   <div class="card"><h3>Gastos por categoría${mt.inc>0?`<span class="badge ${mt.inc-mt.exp>=0?'g':'r'}">Ahorro ${Math.round((mt.inc-mt.exp)/mt.inc*100)}%</span>`:''}</h3>${top.length?`<div class="dn">${donut(top,short(mt.exp))}<div class="lg">${top.map(d=>`<div><i style="background:${d.color}"></i><span>${d.icon} ${esc(d.label)}</span><b>${Math.round(d.value/mt.exp*100)}%</b></div>`).join('')}</div></div>${pace}`:'<div class="empty">Sin gastos este mes</div>'}</div>
   ${alerts.length?`<div class="card"><h3>⚠️ Presupuestos<button onclick="go('budgets')">Ver todos</button></h3>${alerts.map(c=>{const s=mt.by[c.id]||0,p=s/S.budgets[c.id];return `<div style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;font-size:14px"><b>${c.icon} ${esc(c.name)}</b><span class="${p>=1?'neg':''}">${money(s)} / ${money(S.budgets[c.id])}</span></div><div class="bar"><i style="width:${Math.min(100,p*100)}%;background:var(--${p>=1?'r':'o'})"></i></div></div>`}).join('')}</div>`:''}
   <div class="card"><h3>Últimos 6 meses<span class="sm" style="text-transform:none"><span class="pos">■</span> Ingresos <span class="neg">■</span> Gastos</span></h3>${bars(six)}</div>
-  ${up.length?`<div class="card"><h3>Próximos 30 días<button onclick="go('rec')">Recurrentes</button></h3>${up.map(u=>`<div class="li"><div class="ic">${u.icon}</div><div class="m"><b>${esc(u.name)}</b><span>${dLabel(u.date)}${u.manual?' · manual':' · automático'}</span></div><div class="v ${u.type==='income'?'pos':''}">${money(u.amount)}</div></div>`).join('')}</div>`:''}
   <div class="card"><h3>Cuentas<button onclick="go('acc')">Administrar</button></h3>${S.accounts.map(a=>`<div class="li"><div class="ic">${ATYPES[a.type]?.[1]||'💵'}</div><div class="m"><b>${esc(a.name)}</b><span>${ATYPES[a.type]?.[0]||''}</span></div><div class="v ${b[a.id]<0?'neg':''}">${money(b[a.id])}</div></div>`).join('')}</div>
   <div class="card"><h3>Últimos movimientos<button onclick="go('tx')">Ver todos</button></h3>${last.length?last.map(txRow).join(''):'<div class="empty">Aún no hay movimientos.<br>Toca <b>+</b> para registrar el primero.</div>'}</div>`}
 function vTx(){return `<input class="search" type="search" placeholder="Buscar nota, categoría o cuenta…" value="${esc(txF.q)}" oninput="txF.q=this.value;drawTxList()">
@@ -355,7 +356,7 @@ function vProj(){const p=project(12),r=p.rows,neg=r.find(x=>x.bal<0),avg=sum(r.s
   <div class="card"><h3>Detalle mensual</h3><table><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Saldo</th></tr>${r.map(x=>`<tr><td>${mShort(x.ym)} ${x.ym.slice(2,4)}</td><td class="pos">${short(x.inc)}</td><td class="neg">${short(x.exp)}</td><td class="${x.bal<0?'neg':''}"><b>${short(x.bal)}</b></td></tr>`).join('')}</table></div>
   <p class="tip"><b>¿Cómo se calcula?</b> Saldo actual + recurrentes programados + cuotas de deudas (con sus intereses) + promedio de tus ingresos y gastos variables de los últimos 3 meses (hoy: ${money(p.vi)} de ingreso y ${money(p.ve)} de gasto variable al mes). Entre más registres, más precisa es.</p>`}
 function vRec(){const rs=[...S.recurring].sort((a,b)=>a.nextDate<b.nextDate?-1:1);
-  return `<p class="tip">Lo que programes aquí se registra solo cuando llega la fecha, sin que tengas que hacer nada.</p>${rs.length?`<div class="card">${rs.map(r=>{const c=cat(r.categoryId);return `<button class="li" onclick="${r.debtId?`openDebt('${r.debtId}')`:`openRec('${r.id}')`}" style="${r.active?'':'opacity:.5'}"><div class="ic">${r.type==='transfer'?'🔁':c.icon}</div><div class="m"><b>${esc(r.note||c.name)}</b><span>${FREQ[r.freq]} · ${r.active?'próximo '+dShort(r.nextDate):'pausado'}</span></div><div class="v ${r.type==='income'?'pos':''}">${money(r.amount)}</div></button>`}).join('')}</div>`:'<div class="empty">Nada programado todavía</div>'}<button class="btn" onclick="openRec()">+ Nuevo recurrente</button>`}
+  return `<p class="tip">Programa aquí tus pagos e ingresos de cada mes. Aparecen en el Resumen como <b>por pagar</b> y los marcas con el botón <b>Pagar</b>; si prefieres, cada uno puede registrarse solo al llegar la fecha.</p>${rs.length?`<div class="card">${rs.map(r=>{const c=cat(r.categoryId);return `<button class="li" onclick="${r.debtId?`openDebt('${r.debtId}')`:`openRec('${r.id}')`}" style="${r.active?'':'opacity:.5'}"><div class="ic">${r.type==='transfer'?'🔁':c.icon}</div><div class="m"><b>${esc(r.note||c.name)}</b><span>${FREQ[r.freq]} · ${r.active?'próximo '+dShort(r.nextDate):'pausado'}${r.debtId?'':r.auto===false?' · lo marcas tú':' · automático'}</span></div><div class="v ${r.type==='income'?'pos':''}">${money(r.amount)}</div></button>`}).join('')}</div>`:'<div class="empty">Nada programado todavía</div>'}<button class="btn" onclick="openRec()">+ Nuevo recurrente</button>`}
 function vAcc(){const b=balances();return `<div class="card">${S.accounts.map(a=>`<button class="li" onclick="openAcc('${a.id}')"><div class="ic">${ATYPES[a.type]?.[1]||'💵'}</div><div class="m"><b>${esc(a.name)}</b><span>${ATYPES[a.type]?.[0]||''} · inicial ${money(a.initial||0)}</span></div><div class="v ${b[a.id]<0?'neg':''}">${money(b[a.id])}</div></button>`).join('')}</div><button class="btn" onclick="openAcc()">+ Nueva cuenta</button><p class="tip">El <b>saldo inicial</b> es lo que tenías antes de empezar a registrar. En tarjetas de crédito pon en negativo lo que debes hoy (ej. −500.000).</p>`}
 function vCats(){const g=t=>`<div class="card"><h3>${t==='expense'?'Gastos':'Ingresos'}</h3>${S.categories.filter(c=>c.type===t).map(c=>`<button class="li" onclick="openCat('${c.id}')"><div class="ic" style="background:${c.color}22">${c.icon}</div><div class="m"><b>${esc(c.name)}</b></div><div class="v mut">›</div></button>`).join('')}</div>`;
   return g('expense')+g('income')+`<button class="btn" onclick="openCat()">+ Nueva categoría</button>`}
@@ -385,7 +386,7 @@ function drawTx(){const T=D.type==='transfer';
 function saveTx(){syncD();const T=D.type==='transfer';
   if(!(D.amount>0))return toast('Escribe un valor');if(!T&&!D.categoryId)return toast('Elige una categoría');if(T&&D.accountId===D.toAccountId)return toast('Las cuentas deben ser distintas');
   const{isNew,rep,...t}=D;if(T){delete t.categoryId;delete t.debtId}else delete t.toAccountId;
-  if(isNew){t.id=uid();if(rep){const r={id:uid(),type:t.type,amount:t.amount,accountId:t.accountId,toAccountId:t.toAccountId,categoryId:t.categoryId,note:t.note,freq:rep,day:pd(t.date).getDate(),active:true};r.nextDate=nextDate(r,t.date);S.recurring.push(r);t.recurringId=r.id}S.tx.push(t)}
+  if(isNew){t.id=uid();if(rep){const r={id:uid(),type:t.type,amount:t.amount,accountId:t.accountId,toAccountId:t.toAccountId,categoryId:t.categoryId,note:t.note,freq:rep,day:pd(t.date).getDate(),active:true,auto:false};r.nextDate=nextDate(r,t.date);S.recurring.push(r);t.recurringId=r.id}S.tx.push(t)}
   else S.tx[S.tx.findIndex(x=>x.id===t.id)]=t;
   M=t.date.slice(0,7);processRecurring();commit(isNew?(rep?'Guardado y programado 🔄':'Guardado ✓'):'Actualizado ✓')}
 function delTx(){if(!confirm('¿Eliminar este movimiento?'))return;S.tx=S.tx.filter(x=>x.id!==D.id);commit('Eliminado')}
@@ -425,14 +426,22 @@ function savePay(id){const d=S.debts.find(x=>x.id===id),a=parseAmt(val('p_amt'))
 
 /* ============ Otros formularios ============ */
 function openBudget(cid){const c=cat(cid);openSheet('Presupuesto',`<p class="tip" style="margin-top:0">${c.icon} ${esc(c.name)} · límite mensual (deja en 0 para quitarlo)</p>${F.amt('b_amt','Límite por mes',S.budgets[cid])}<button class="btn" onclick="S.budgets['${cid}']=parseAmt(val('b_amt'));if(!S.budgets['${cid}'])delete S.budgets['${cid}'];commit('Presupuesto guardado ✓')">Guardar</button>`)}
-function openRec(id){const r=id?S.recurring.find(x=>x.id===id):{type:'expense',freq:'monthly',nextDate:today(),active:true,accountId:S.accounts[0]?.id};
+function openRec(id){const r=id?S.recurring.find(x=>x.id===id):{type:'expense',freq:'monthly',nextDate:today(),active:true,auto:false,accountId:S.accounts[0]?.id};
   openSheet(id?'Editar recurrente':'Nuevo recurrente',`${F.sel('r_type','Tipo',[['expense','Gasto'],['income','Ingreso']],r.type,`onchange="recCats(this.value)"`)}${F.text('r_note','Nombre',r.note,'placeholder="Ej. Arriendo, Sueldo, Netflix"')}${F.amt('r_amt','Valor',r.amount)}
   <div class="g2">${F.sel('r_cat','Categoría',[],r.categoryId)}${F.sel('r_acc','Cuenta',accOpts(),r.accountId)}</div>
-  <div class="g2">${F.sel('r_freq','Frecuencia',Object.entries(FREQ),r.freq)}${F.date('r_next','Próxima fecha',r.nextDate)}</div>${F.chk('r_on','Activo',r.active)}
+  <div class="g2">${F.sel('r_freq','Frecuencia',Object.entries(FREQ),r.freq)}${F.date('r_next','Próxima fecha',r.nextDate)}</div>${F.sel('r_auto','Al llegar la fecha',[['0','Queda pendiente hasta que yo lo marque'],['1','Se registra solo (automático)']],r.auto===false?'0':'1')}${F.chk('r_on','Activo',r.active)}
   <div style="height:6px"></div><button class="btn" onclick="saveRec('${id||''}')">Guardar</button>${id?`<div style="height:8px"></div><button class="btn d" onclick="if(confirm('¿Eliminar?')){S.recurring=S.recurring.filter(x=>x.id!=='${id}');commit('Eliminado')}">Eliminar</button>`:''}`);recCats(r.type,r.categoryId)}
+function openConfirm(id){const r=S.recurring.find(x=>x.id===id),inc=r.type==='income';
+  openSheet(inc?'Marcar como recibido':'Marcar como pagado',`<p class="tip" style="margin-top:0">${esc(r.note||cat(r.categoryId).name)} · programado para el <b>${dLabel(r.nextDate)}</b>. Ajusta el valor si esta vez fue distinto.</p>${F.amt('k_amt','Valor',r.amount)}<div class="g2">${F.sel('k_acc','Cuenta',accOpts(),r.accountId)}${F.date('k_date',inc?'Fecha en que lo recibí':'Fecha en que lo pagué',today())}</div>
+  <button class="btn" onclick="saveConfirm('${id}')">${inc?'Confirmar ingreso':'Confirmar pago'}</button><div style="height:8px"></div><button class="btn s" onclick="saveConfirm('${id}',1)">Omitir esta vez (no se registra nada)</button>`)}
+function saveConfirm(id,skip){const r=S.recurring.find(x=>x.id===id);
+  if(!skip){const a=parseAmt(val('k_amt'));if(!(a>0))return toast('Escribe un valor');
+    S.tx.push({id:uid(),type:r.type,amount:a,date:val('k_date')||today(),accountId:val('k_acc'),toAccountId:r.toAccountId,categoryId:r.categoryId,note:r.note||'',recurringId:r.id})}
+  r.nextDate=nextDate(r,r.nextDate);if(r.endDate&&r.nextDate>r.endDate)r.active=false;
+  commit(skip?'Omitido: queda para '+dShort(r.nextDate):'Registrado ✓ · próximo '+dShort(r.nextDate))}
 function recCats(t,v){$('#r_cat').innerHTML=S.categories.filter(c=>c.type===t).map(c=>`<option value="${c.id}" ${c.id===v?'selected':''}>${c.icon} ${esc(c.name)}</option>`).join('')}
 function saveRec(id){const r=id?S.recurring.find(x=>x.id===id):{id:uid()},nd=val('r_next')||today();
-  Object.assign(r,{type:val('r_type'),note:val('r_note'),amount:parseAmt(val('r_amt')),categoryId:val('r_cat'),accountId:val('r_acc'),freq:val('r_freq'),nextDate:nd,day:pd(nd).getDate(),active:val('r_on')});
+  Object.assign(r,{type:val('r_type'),note:val('r_note'),amount:parseAmt(val('r_amt')),categoryId:val('r_cat'),accountId:val('r_acc'),freq:val('r_freq'),nextDate:nd,day:pd(nd).getDate(),active:val('r_on'),auto:val('r_auto')==='1'});
   if(!(r.amount>0))return toast('Escribe un valor');if(!id)S.recurring.push(r);processRecurring();commit('Guardado ✓')}
 function openAcc(id){const a=id?S.accounts.find(x=>x.id===id):{type:'bank'};
   openSheet(id?'Editar cuenta':'Nueva cuenta',`${F.text('a_name','Nombre',a.name,'placeholder="Ej. Nequi, Bancolombia, Visa"')}${F.sel('a_type','Tipo',Object.entries(ATYPES).map(([k,v])=>[k,v[1]+' '+v[0]]),a.type)}<label>Saldo inicial<input id="a_init" inputmode="text" value="${a.initial<0?'-':''}${toInp(Math.abs(a.initial||0))}" placeholder="0"></label>
