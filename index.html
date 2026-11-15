@@ -396,8 +396,9 @@ function delTx(){if(!confirm('¿Eliminar este movimiento?'))return;S.tx=S.tx.fil
 /* ============ Deudas ============ */
 function openDebt(id){const d=id?S.debts.find(x=>x.id===id):{kind:'owe',rateType:'ea',startDate:today(),accountId:S.accounts[0]?.id},auto=id&&S.recurring.some(r=>r.debtId===id);
   openSheet(id?'Editar deuda':'Nueva deuda',`${F.sel('d_kind','Tipo',[['owe','Yo debo (préstamo, crédito…)'],['owed','Me deben']],d.kind)}${F.text('d_name','Nombre',d.name,'placeholder="Ej. Crédito banco, préstamo a Pedro"')}
-  ${F.amt('d_orig','Monto total de la deuda (opcional, si ya venías pagando)',d.original)}
-  <div class="g2">${F.amt('d_principal','Saldo a la fecha',d.principal)}${F.date('d_start','Fecha de ese saldo',d.startDate)}</div>
+  ${F.amt('d_orig','Monto total de la deuda',d.original||d.principal)}
+  <div class="g2">${F.amt('d_paid',id?'Pagado antes de registrarla':'Total pagado a la fecha',d.original>d.principal?d.original-d.principal:0)}${F.date('d_start','Fecha de corte',d.startDate)}</div>
+  <p class="tip" style="margin-top:-4px">El saldo se calcula solo: monto total menos lo pagado. Si no has pagado nada, deja lo pagado en 0.</p>
   <div class="g2">${F.num('d_rate','Tasa de interés %',d.rate,'placeholder="0" step="0.01"')}${F.sel('d_rt','Tipo de tasa',[['ea','Efectiva anual (E.A.)'],['m','Mensual']],d.rateType)}</div>
   ${F.sel('d_mode','Tipo de cuota',[['fixed','Fija: el mismo valor todos los meses'],['variable','Variable: puede subir o bajar con el tiempo'],['single','Pago único: se paga todo en una fecha']],d.payMode||'fixed',`onchange="const o=this.value==='single';$('#d_rec').style.display=o?'none':'';$('#d_one').style.display=o?'':'none'"`)}
   <div id="d_one" ${d.payMode==='single'?'':'style="display:none"'}>${F.date('d_due','Fecha de pago',d.dueDate)}</div>
@@ -406,8 +407,8 @@ function openDebt(id){const d=id?S.debts.find(x=>x.id===id):{kind:'owe',rateType
   ${F.sel('d_acc','Cuenta con la que pagas / recibes',accOpts(),d.accountId)}${F.chk('d_auto','Registrar el pago automáticamente cuando llegue la fecha',auto)}
   <div style="height:6px"></div><button class="btn" onclick="saveDebt('${id||''}')">Guardar</button>${id?`<div style="height:8px"></div><button class="btn d" onclick="delDebt('${id}')">Eliminar deuda</button>`:''}`)}
 function saveDebt(id){const d=id?S.debts.find(x=>x.id===id):{id:uid()};
-  Object.assign(d,{kind:val('d_kind'),name:val('d_name'),principal:parseAmt(val('d_principal')),original:parseAmt(val('d_orig'))||0,startDate:val('d_start')||today(),rate:parseFloat(val('d_rate'))||0,rateType:val('d_rt'),payMode:val('d_mode'),payment:$('#d_pay')?parseAmt(val('d_pay')):payAt(d,today()),dueDay:Math.min(31,Math.max(1,parseInt(val('d_day'))||pd(val('d_start')||today()).getDate())),accountId:val('d_acc')});
-  if(!d.name)return toast('Ponle un nombre');if(!(d.principal>0))return toast('Escribe el saldo');if(d.original&&d.original<d.principal)return toast('El monto total no puede ser menor que el saldo');
+  Object.assign(d,{kind:val('d_kind'),name:val('d_name'),original:parseAmt(val('d_orig')),principal:parseAmt(val('d_orig'))-parseAmt(val('d_paid')),startDate:val('d_start')||today(),rate:parseFloat(val('d_rate'))||0,rateType:val('d_rt'),payMode:val('d_mode'),payment:$('#d_pay')?parseAmt(val('d_pay')):payAt(d,today()),dueDay:Math.min(31,Math.max(1,parseInt(val('d_day'))||pd(val('d_start')||today()).getDate())),accountId:val('d_acc')});
+  if(!d.name)return toast('Ponle un nombre');if(!(d.original>0))return toast('Escribe el monto total');if(!(d.principal>0))return toast('Lo pagado debe ser menor que el monto total');
   const one=d.payMode==='single';if(one){d.dueDate=val('d_due');if(!d.dueDate)return toast('Pon la fecha de pago');d.payment=0;d.dueDay=pd(d.dueDate).getDate()}
   if(d.payMode==='variable'&&!d.payHist?.length)d.payHist=[{from:d.startDate,amount:d.payment}];
   if(!id)S.debts.push(d);S.recurring=S.recurring.filter(r=>r.debtId!==d.id);
