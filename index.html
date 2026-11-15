@@ -162,7 +162,7 @@ function schedulePush(){clearTimeout(pushT);pushT=setTimeout(syncNow,1500);setSy
 function tables(){const L={income:'Ingreso',expense:'Gasto',transfer:'Transferencia'},b=balances(),t=today();
   return{Movimientos:[['Fecha','Tipo','Valor','Categoría','Cuenta','Cuenta destino','Nota'],...[...S.tx].sort((a,b)=>a.date<b.date?1:-1).map(x=>[x.date,L[x.type],x.amount,x.type==='transfer'?'':cat(x.categoryId).name,acc(x.accountId).name,x.toAccountId?acc(x.toAccountId).name:'',x.note||''])],
     Cuentas:[['Cuenta','Tipo','Saldo actual'],...S.accounts.map(a=>[a.name,ATYPES[a.type]?.[0]||'',Math.round(b[a.id]*100)/100])],
-    Deudas:[['Nombre','Tipo','Saldo inicial','Saldo actual','Tasa %','Tipo de tasa','Cuota vigente','Tipo de cuota','Día de pago'],...S.debts.map(d=>[d.name,d.kind==='owed'?'Me deben':'Debo',d.principal,Math.round(debtInfo(d).bal),d.rate||0,d.rateType==='m'?'Mensual':'E.A.',payAt(d,t),d.payMode==='variable'?'Variable':'Fija',d.dueDay||''])]}}
+    Deudas:[['Nombre','Tipo','Saldo inicial','Saldo actual','Tasa %','Tipo de tasa','Cuota vigente','Tipo de cuota','Día o fecha de pago'],...S.debts.map(d=>[d.name,d.kind==='owed'?'Me deben':'Debo',d.principal,Math.round(debtInfo(d).bal),d.rate||0,d.rateType==='m'?'Mensual':'E.A.',d.payMode==='single'?'':payAt(d,t),d.payMode==='single'?'Pago único':d.payMode==='variable'?'Variable':'Fija',d.payMode==='single'?d.dueDate:d.dueDay||''])]}}
 function applyRemote(r){S=Object.assign(seed(),JSON.parse(r.state));localStorage.setItem(KEY,JSON.stringify(S));SY.rev=r.rev;SY.dirty=false;sySave()}
 async function syncNow(){
   if(!SY?.token||syncing)return;syncing=true;clearTimeout(pushT);let pushing=false;
@@ -215,7 +215,8 @@ function balances(){const b={};for(const a of S.accounts)b[a.id]=a.initial||0;
 function monthTotals(ym){let inc=0,exp=0;const by={};for(const t of S.tx){if(!t.date.startsWith(ym)||t.type==='transfer')continue;if(t.type==='income')inc+=t.amount;else{exp+=t.amount;by[t.categoryId]=(by[t.categoryId]||0)+t.amount}}return{inc,exp,by}}
 const mRate=d=>!d.rate?0:d.rateType==='m'?d.rate/100:Math.pow(1+d.rate/100,1/12)-1;
 // Cuota vigente en una fecha. Con cuota variable se guarda un historial {from, amount}: cada ajuste aplica desde su fecha hacia adelante y no toca lo anterior.
-function payAt(d,date){if(d.payMode!=='variable'||!d.payHist?.length)return d.payment||0;let v=d.payHist[0].amount;for(const h of d.payHist)if(h.from<=date)v=h.amount;return v}
+function payAt(d,date){if(d.payMode==='single')return d.dueDate&&date>=d.dueDate?Number.MAX_SAFE_INTEGER:0; // pago único: todo el saldo en la fecha pactada (siempre se limita al saldo al usarlo)
+  if(d.payMode!=='variable'||!d.payHist?.length)return d.payment||0;let v=d.payHist[0].amount;for(const h of d.payHist)if(h.from<=date)v=h.amount;return v}
 function debtInfo(d){
   const pays=S.tx.filter(t=>t.debtId===d.id).sort((a,b)=>a.date<b.date?-1:1),mr=mRate(d),t=today(),day=pd(d.startDate).getDate();
   let bal=d.principal,interest=0,paid=0,i=0,cur=addMonths(d.startDate,1,day),g=0;
@@ -223,7 +224,8 @@ function debtInfo(d){
     if(bal>0){const it=bal*mr;bal+=it;interest+=it}cur=addMonths(cur,1,day)}
   for(;i<pays.length;i++){bal-=pays[i].amount;paid+=pays[i].amount}
   bal=Math.max(0,bal);
-  let po=null;if(bal>0.5&&payAt(d,t)>0){let b=bal,n=0,int=0;while(b>0.5&&n<720){const it=b*mr,pay=payAt(d,addMonths(t,n+1));if(pay<=it){n=-1;break}b+=it;int+=it;b-=Math.min(pay,b);n++}po=n<0?{never:true}:{n,int,date:addMonths(t,n)}}
+  let po=null;if(d.payMode==='single'){if(bal>0.5&&d.dueDate){const a=pd(t),z=pd(d.dueDate),n=Math.max(0,(z.getFullYear()-a.getFullYear())*12+z.getMonth()-a.getMonth());po={single:true,n,int:bal*(Math.pow(1+mr,n)-1),date:d.dueDate,overdue:d.dueDate<t}}}
+  else if(bal>0.5&&payAt(d,t)>0){let b=bal,n=0,int=0;while(b>0.5&&n<720){const it=b*mr,pay=payAt(d,addMonths(t,n+1));if(pay<=it){n=-1;break}b+=it;int+=it;b-=Math.min(pay,b);n++}po=n<0?{never:true}:{n,int,date:addMonths(t,n)}}
   return{bal,interest,paid,po,total:d.principal+interest,pct:Math.min(100,paid/(d.principal+interest||1)*100)}}
 function nextDate(r,s){const day=r.day||pd(s).getDate();
   if(r.freq==='weekly')return addDays(s,7);if(r.freq==='biweekly')return addDays(s,14);if(r.freq==='yearly')return addMonths(s,12,day);
@@ -238,11 +240,13 @@ function processRecurring(){const t=today();let n=0;
       S.tx.push({id:uid(),type:r.type,amount,date:r.nextDate,accountId:r.accountId,toAccountId:r.toAccountId,categoryId:r.categoryId,note:r.note||'',recurringId:r.id,...(r.debtId?{debtId:r.debtId}:{})});n++;
       r.nextDate=nextDate(r,r.nextDate);if(r.endDate&&r.nextDate>r.endDate){r.active=false;break}}}
   if(n){save();setTimeout(()=>toast(`✅ ${n} movimiento${n>1?'s':''} automático${n>1?'s':''} registrado${n>1?'s':''}`),500)}}
-function nextDue(d){const t=today(),ym=t.slice(0,7),day=d.dueDay||pd(d.startDate).getDate();let due=addMonths(ym+'-01',0,day);
+function nextDue(d){if(d.payMode==='single')return d.dueDate||today();const t=today(),ym=t.slice(0,7),day=d.dueDay||pd(d.startDate).getDate();let due=addMonths(ym+'-01',0,day);
   if(due<t||S.tx.some(x=>x.debtId===d.id&&x.date.startsWith(ym)))due=addMonths(ym+'-01',1,day);return due}
 function upcoming(days=30){const t=today(),to=addDays(t,days),o=[];
-  for(const r of S.recurring)if(r.active)for(const d of occurrences(r,t,to))o.push({date:d,name:r.note||cat(r.categoryId).name,icon:r.type==='transfer'?'🔁':cat(r.categoryId).icon,amount:r.debtId?payAt(S.debts.find(x=>x.id===r.debtId)||{},d)||r.amount:r.amount,type:r.type});
-  for(const d of S.debts){const due=nextDue(d),p=payAt(d,due);if(!(p>0)||S.recurring.some(r=>r.debtId===d.id&&r.active))continue;const i=debtInfo(d);if(i.bal<=0.5)continue;if(due<=to)o.push({date:due,name:'Cuota '+d.name,icon:'💳',amount:Math.min(p,i.bal),type:d.kind==='owed'?'income':'expense',manual:true})}
+  for(const r of S.recurring){if(!r.active)continue;const dd=r.debtId&&S.debts.find(x=>x.id===r.debtId),db=dd?debtInfo(dd).bal:0;if(dd&&db<=0.5)continue;
+    let oc=occurrences(r,t,to);if(dd?.payMode==='single')oc=oc.slice(0,1); // un pago único no se repite
+    for(const d of oc)o.push({date:d,name:r.note||cat(r.categoryId).name,icon:r.type==='transfer'?'🔁':cat(r.categoryId).icon,amount:dd?Math.min(payAt(dd,d)||r.amount,db):r.amount,type:r.type})}
+  for(const d of S.debts){const due=nextDue(d),p=payAt(d,due);if(!(p>0)||S.recurring.some(r=>r.debtId===d.id&&r.active))continue;const i=debtInfo(d);if(i.bal<=0.5)continue;if(due<=to)o.push({date:due,name:(d.payMode==='single'?'Pago ':'Cuota ')+d.name,icon:'💳',amount:Math.min(p,i.bal),type:d.kind==='owed'?'income':'expense',manual:true})}
   return o.sort((a,b)=>a.date<b.date?-1:1)}
 function project(n=12){
   const t=today(),cur=t.slice(0,7),d=pd(t),dim=lastDay(d.getFullYear(),d.getMonth());
@@ -257,7 +261,9 @@ function project(n=12){
   for(let i=0;i<n;i++){const ym=addMonths(cur+'-01',i).slice(0,7),y=+ym.slice(0,4),m=+ym.slice(5)-1,from=i?ym+'-01':addDays(t,1),to=`${ym}-${pad(lastDay(y,m))}`,f=i?1:(dim-d.getDate())/dim;
     let inc=vi*f,exp=ve*f;
     for(const r of S.recurring){if(!r.active||r.debtId||r.type==='transfer')continue;const k=occurrences(r,from,to).length*r.amount;r.type==='income'?inc+=k:exp+=k}
-    for(const s of ds){if(s.bal<=0.5)continue;const due=addMonths(ym+'-01',0,s.d.dueDay||pd(s.d.startDate).getDate());if(!i&&(due<=t||S.tx.some(x=>x.debtId===s.d.id&&x.date.startsWith(ym))))continue;
+    for(const s of ds){if(s.bal<=0.5)continue;
+      if(s.d.payMode==='single'){const dd=s.d.dueDate||'';if(i)s.bal+=s.bal*s.mr;if(dd&&(dd.slice(0,7)===ym||(!i&&dd<t))){s.d.kind==='owed'?inc+=s.bal:exp+=s.bal;s.bal=0}continue}
+      const due=addMonths(ym+'-01',0,s.d.dueDay||pd(s.d.startDate).getDate());if(!i&&(due<=t||S.tx.some(x=>x.debtId===s.d.id&&x.date.startsWith(ym))))continue;
       s.bal+=s.bal*s.mr;const p=Math.min(payAt(s.d,due),s.bal);s.bal-=p;s.d.kind==='owed'?inc+=p:exp+=p}
     bal+=inc-exp;rows.push({ym,inc,exp,net:inc-exp,bal,debt:sum(ds.filter(s=>s.d.kind!=='owed'),s=>s.bal)})}
   return{rows,vi,ve}}
@@ -326,13 +332,13 @@ function drawTxList(){const q=txF.q.toLowerCase();
 function vDebts(){
   const di=S.debts.map(d=>({d,i:debtInfo(d)})),act=di.filter(x=>x.i.bal>0.5),owe=act.filter(x=>x.d.kind!=='owed'),owed=act.filter(x=>x.d.kind==='owed');
   const prio=[...owe].sort((a,b)=>mRate(b.d)-mRate(a.d))[0],last=owe.map(x=>x.i.po).filter(p=>p&&!p.never).map(p=>p.date).sort().pop();
-  const card=({d,i})=>{const o=d.kind==='owed',auto=S.recurring.some(r=>r.debtId===d.id&&r.active),vr=d.payMode==='variable',cp=payAt(d,today()),nx=vr&&(d.payHist||[]).find(h=>h.from>today());
-    return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="min-width:0"><b style="font-size:17px">${esc(d.name)}</b><div class="sm mut">${d.rate?`${d.rate}% ${d.rateType==='m'?'mensual':'E.A.'}`:'Sin interés'}${cp?` · cuota ${vr?'variable':'fija'} ${money(cp)}`:''}${auto?' · 🔄 auto':''}${nx?`<br>Cambia a ${money(nx.amount)} desde ${dShort(nx.from)}`:''}</div></div><span class="badge ${i.bal<=0.5?'g':o?'g':'r'}">${i.bal<=0.5?'Pagada ✓':o?'Me deben':'Debo'}</span></div>
+  const card=({d,i})=>{const o=d.kind==='owed',auto=S.recurring.some(r=>r.debtId===d.id&&r.active),vr=d.payMode==='variable',one=d.payMode==='single',cp=one?0:payAt(d,today()),nx=vr&&(d.payHist||[]).find(h=>h.from>today());
+    return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="min-width:0"><b style="font-size:17px">${esc(d.name)}</b><div class="sm mut">${d.rate?`${d.rate}% ${d.rateType==='m'?'mensual':'E.A.'}`:'Sin interés'}${cp?` · cuota ${vr?'variable':'fija'} ${money(cp)}`:''}${one&&d.dueDate?` · pago único ${dShort(d.dueDate)}`:''}${auto?' · 🔄 auto':''}${nx?`<br>Cambia a ${money(nx.amount)} desde ${dShort(nx.from)}`:''}</div></div><span class="badge ${i.bal<=0.5?'g':o?'g':'r'}">${i.bal<=0.5?'Pagada ✓':o?'Me deben':'Debo'}</span></div>
     <div style="font-size:26px;font-weight:800;margin:8px 0 0;font-variant-numeric:tabular-nums">${money(i.bal)}</div><div class="bar"><i style="width:${i.pct}%"></i></div>
     <div class="sm mut" style="display:flex;justify-content:space-between"><span>Pagado ${money(i.paid)} (${Math.round(i.pct)}%)</span><span>Inicial ${money(d.principal)}</span></div>
-    ${i.bal>0.5?`<div class="tip" style="margin-top:8px">${i.po?(i.po.never?'⚠️ La cuota no alcanza a cubrir los intereses: la deuda nunca se termina. Sube la cuota.':`🏁 Termina en <b>${mLabel(i.po.date.slice(0,7))}</b> (${i.po.n} cuotas) · intereses restantes <b>${money(i.po.int)}</b>`):'Define una cuota mensual para proyectar cuándo terminas.'}${i.interest>0?`<br>Intereses acumulados hasta hoy: ${money(i.interest)}`:''}</div>`:''}
+    ${i.bal>0.5?`<div class="tip" style="margin-top:8px">${i.po?.single?(i.po.overdue?`⚠️ Venció el <b>${dLabel(i.po.date)}</b> y sigue pendiente.`:`📅 Pago único el <b>${dLabel(i.po.date)}</b>${i.po.int>0.5?` · pagarás aprox. <b>${money(i.bal+i.po.int)}</b> con intereses`:''}`):i.po?(i.po.never?'⚠️ La cuota no alcanza a cubrir los intereses: la deuda nunca se termina. Sube la cuota.':`🏁 Termina en <b>${mLabel(i.po.date.slice(0,7))}</b> (${i.po.n} cuotas) · intereses restantes <b>${money(i.po.int)}</b>`):'Define una cuota mensual para proyectar cuándo terminas.'}${i.interest>0?`<br>Intereses acumulados hasta hoy: ${money(i.interest)}`:''}</div>`:''}
     <div class="row" style="margin-top:12px">${i.bal>0.5?`<button class="btn sm" onclick="openPay('${d.id}')">${o?'Registrar cobro':'Abonar'}</button>`:''}${vr&&i.bal>0.5?`<button class="btn sm s" onclick="openAdj('${d.id}')">Ajustar cuota</button>`:''}<button class="btn sm s" onclick="openDebt('${d.id}')">Editar</button></div></div>`};
-  return `<div class="g3"><div class="st"><div class="l">Debo</div><b class="neg">${money(sum(owe,x=>x.i.bal))}</b></div><div class="st"><div class="l">Me deben</div><b class="pos">${money(sum(owed,x=>x.i.bal))}</b></div><div class="st"><div class="l">Cuotas/mes</div><b>${money(sum(owe,x=>payAt(x.d,today())))}</b></div></div>
+  return `<div class="g3"><div class="st"><div class="l">Debo</div><b class="neg">${money(sum(owe,x=>x.i.bal))}</b></div><div class="st"><div class="l">Me deben</div><b class="pos">${money(sum(owed,x=>x.i.bal))}</b></div><div class="st"><div class="l">Cuotas/mes</div><b>${money(sum(owe,x=>x.d.payMode==='single'?0:payAt(x.d,today())))}</b></div></div>
   ${owe.length?`<div class="card tip">${last?`🗓️ Libre de deudas en <b>${mLabel(last.slice(0,7))}</b> si mantienes las cuotas.<br>`:''}${owe.length>1&&prio&&prio.d.rate?`💡 Prioriza abonos extra a <b>${esc(prio.d.name)}</b>: tiene la tasa más alta (${prio.d.rate}% ${prio.d.rateType==='m'?'mensual':'E.A.'}).`:''}${!last&&!(owe.length>1&&prio?.d.rate)?'Registra cuota y tasa en cada deuda para ver la fecha estimada de pago total.':''}</div>`:''}
   ${di.length?di.sort((a,b)=>b.i.bal-a.i.bal).map(card).join(''):'<div class="empty">No tienes deudas registradas 🎉<br>Agrega préstamos, créditos o plata que te deban.</div>'}
   <button class="btn" onclick="openDebt()">+ Agregar deuda</button>
@@ -389,17 +395,19 @@ function openDebt(id){const d=id?S.debts.find(x=>x.id===id):{kind:'owe',rateType
   openSheet(id?'Editar deuda':'Nueva deuda',`${F.sel('d_kind','Tipo',[['owe','Yo debo (préstamo, crédito…)'],['owed','Me deben']],d.kind)}${F.text('d_name','Nombre',d.name,'placeholder="Ej. Crédito banco, préstamo a Pedro"')}
   <div class="g2">${F.amt('d_principal','Saldo al registrar',d.principal)}${F.date('d_start','Fecha de ese saldo',d.startDate)}</div>
   <div class="g2">${F.num('d_rate','Tasa de interés %',d.rate,'placeholder="0" step="0.01"')}${F.sel('d_rt','Tipo de tasa',[['ea','Efectiva anual (E.A.)'],['m','Mensual']],d.rateType)}</div>
-  ${F.sel('d_mode','Tipo de cuota',[['fixed','Fija: el mismo valor todos los meses'],['variable','Variable: puede subir o bajar con el tiempo']],d.payMode||'fixed')}
-  <div class="g2">${id&&d.payMode==='variable'&&d.payHist?.length?`<label>Cuota vigente<input value="${toInp(payAt(d,today()))}" disabled></label>`:F.amt('d_pay',id?'Cuota mensual':'Cuota mensual (inicial)',d.payment)}${F.num('d_day','Día de pago (1-31)',d.dueDay,'min="1" max="31" placeholder="15"')}</div>
+  ${F.sel('d_mode','Tipo de cuota',[['fixed','Fija: el mismo valor todos los meses'],['variable','Variable: puede subir o bajar con el tiempo'],['single','Pago único: se paga todo en una fecha']],d.payMode||'fixed',`onchange="const o=this.value==='single';$('#d_rec').style.display=o?'none':'';$('#d_one').style.display=o?'':'none'"`)}
+  <div id="d_one" ${d.payMode==='single'?'':'style="display:none"'}>${F.date('d_due','Fecha de pago',d.dueDate)}</div>
+  <div class="g2" id="d_rec" ${d.payMode==='single'?'style="display:none"':''}>${id&&d.payMode==='variable'&&d.payHist?.length?`<label>Cuota vigente<input value="${toInp(payAt(d,today()))}" disabled></label>`:F.amt('d_pay',id?'Cuota mensual':'Cuota mensual (inicial)',d.payment)}${F.num('d_day','Día de pago (1-31)',d.dueDay,'min="1" max="31" placeholder="15"')}</div>
   ${id&&d.payMode==='variable'&&d.payHist?.length?`<p class="tip" style="margin-top:0">Para cambiar el valor usa <b>Ajustar cuota</b> en la tarjeta de la deuda: el cambio aplica desde la fecha que elijas y lo anterior queda intacto.</p>`:''}
-  ${F.sel('d_acc','Cuenta con la que pagas / recibes',accOpts(),d.accountId)}${F.chk('d_auto','Registrar la cuota automáticamente cada mes',auto)}
+  ${F.sel('d_acc','Cuenta con la que pagas / recibes',accOpts(),d.accountId)}${F.chk('d_auto','Registrar el pago automáticamente cuando llegue la fecha',auto)}
   <div style="height:6px"></div><button class="btn" onclick="saveDebt('${id||''}')">Guardar</button>${id?`<div style="height:8px"></div><button class="btn d" onclick="delDebt('${id}')">Eliminar deuda</button>`:''}`)}
 function saveDebt(id){const d=id?S.debts.find(x=>x.id===id):{id:uid()};
   Object.assign(d,{kind:val('d_kind'),name:val('d_name'),principal:parseAmt(val('d_principal')),startDate:val('d_start')||today(),rate:parseFloat(val('d_rate'))||0,rateType:val('d_rt'),payMode:val('d_mode'),payment:$('#d_pay')?parseAmt(val('d_pay')):payAt(d,today()),dueDay:Math.min(31,Math.max(1,parseInt(val('d_day'))||pd(val('d_start')||today()).getDate())),accountId:val('d_acc')});
   if(!d.name)return toast('Ponle un nombre');if(!(d.principal>0))return toast('Escribe el saldo');
+  const one=d.payMode==='single';if(one){d.dueDate=val('d_due');if(!d.dueDate)return toast('Pon la fecha de pago');d.payment=0;d.dueDay=pd(d.dueDate).getDate()}
   if(d.payMode==='variable'&&!d.payHist?.length)d.payHist=[{from:d.startDate,amount:d.payment}];
   if(!id)S.debts.push(d);S.recurring=S.recurring.filter(r=>r.debtId!==d.id);
-  if(val('d_auto')&&d.payment>0)S.recurring.push({id:uid(),debtId:d.id,type:d.kind==='owed'?'income':'expense',amount:d.payment,accountId:d.accountId,categoryId:d.kind==='owed'?'c_cobro':'c_debt',note:'Cuota '+d.name,freq:'monthly',day:d.dueDay,nextDate:nextDue(d),active:true});
+  if(val('d_auto')&&(d.payment>0||one))S.recurring.push({id:uid(),debtId:d.id,type:d.kind==='owed'?'income':'expense',amount:one?d.principal:d.payment,accountId:d.accountId,categoryId:d.kind==='owed'?'c_cobro':'c_debt',note:(one?'Pago ':'Cuota ')+d.name,freq:'monthly',day:d.dueDay,nextDate:nextDue(d),active:true});
   commit('Deuda guardada ✓')}
 function delDebt(id){if(!confirm('¿Eliminar esta deuda? Los abonos ya registrados se conservan como movimientos.'))return;S.debts=S.debts.filter(d=>d.id!==id);S.recurring=S.recurring.filter(r=>r.debtId!==id);S.tx.forEach(t=>{if(t.debtId===id)delete t.debtId});commit('Eliminada')}
 function openAdj(id){const d=S.debts.find(x=>x.id===id),h=d.payHist||[];
